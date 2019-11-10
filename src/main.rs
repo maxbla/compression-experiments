@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fs::File;
 use std::io::{Write, BufRead, BufReader, Seek, SeekFrom};
 
-use bitvec::prelude::{BitVec, bitvec, BigEndian, LittleEndian};
+use bitvec::prelude::{BitVec, bitvec, LittleEndian};
 
 macro_rules! encoding {
     ($x:expr) => {
@@ -252,8 +252,8 @@ where R: BufRead, W:Write
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let uncompressed_path = "/home/max/code/rust/compression/src/Grimms";
-    let compressed_path = "/home/max/code/rust/compression/src/Grimms.huffman";
+    let uncompressed_path = "./test/Grimms";
+    let compressed_path = "./test/Grimms.huffman";
     let book = BufReader::new(File::open(uncompressed_path)?);
     let out = File::create(compressed_path)?;
     encode(book, out)?;
@@ -277,8 +277,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // file.write(&bytes[..])?;
 
     let compressed = BufReader::new(File::open(compressed_path)?);
-    let out = File::create("/home/max/code/rust/compression/src/Grimms.decompressed")?;
-    let decoded = decode(compressed, out)?;
+    let out = File::create("./test/Grimms.decompressed")?;
+    decode(compressed, out)?;
     //println!("{}", &decoded[0..100]);
 
     Ok(())
