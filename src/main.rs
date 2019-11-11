@@ -1,11 +1,12 @@
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::{Reverse, Ordering};
 use std::error::Error;
+use std::fmt::Display;
 
 use std::fs::File;
-use std::io::{Write, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{Write, BufRead, Read, BufReader, Seek, SeekFrom, ErrorKind};
 
-use bitvec::prelude::{BitVec, bitvec, LittleEndian};
+use bitvec::prelude::{bitvec, LittleEndian};
 
 macro_rules! encoding {
     ($x:expr) => {
@@ -19,7 +20,7 @@ macro_rules! encoding {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum HuffmanNode {
     Leaf(Count, char),
-    Interior(Count, HashMap<char, BitVec<LittleEndian, u8>>)
+    Interior(Count, HashMap<char, BitVec>)
 }
 
 impl Ord for HuffmanNode {
@@ -47,6 +48,30 @@ impl PartialOrd for HuffmanNode {
     }
 }
 
+#[derive(Debug)]
+struct HuffmanEncodingError {
+    /// The bitpattern that was last tried before failing
+    bitpattern: BitVec
+}
+
+impl HuffmanEncodingError {
+    fn new(bitpattern: BitVec) -> HuffmanEncodingError {
+        HuffmanEncodingError{bitpattern}
+    }
+}
+
+impl Display for HuffmanEncodingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "HuffmanEndocingError: {}", self.bitpattern)
+    }
+}
+
+impl Error for HuffmanEncodingError {
+}
+
+/// combines two Huffman Nodes, updating encodings 
+/// for every character, and updating the total character count
+/// the left subtree gets an added 0 to the encoding and the right a 1
 fn combine(left: HuffmanNode, right: HuffmanNode) -> HuffmanNode {
     match (left, right) {
         (HuffmanNode::Leaf(count1, char1), HuffmanNode::Leaf(count2, char2)) => {
@@ -87,6 +112,8 @@ fn combine(left: HuffmanNode, right: HuffmanNode) -> HuffmanNode {
 /// u46, u128 and num::BigInt can be used
 type Count = u32;
 
+type BitVec = bitvec::prelude::BitVec<LittleEndian, u8>;
+
 fn count_chars(r: &mut impl BufRead) -> Result<HashMap<char, Count>, Box<dyn Error>> {
     let mut frequencies = HashMap::new();
     let mut num_lines = 0;
@@ -105,7 +132,7 @@ fn count_chars(r: &mut impl BufRead) -> Result<HashMap<char, Count>, Box<dyn Err
 }
 
 fn char_count_to_huffman_encoding(char_count: HashMap<char, Count>) ->
-    HashMap<char, BitVec<LittleEndian, u8>> 
+    HashMap<char, BitVec> 
 {
     let mut huffman_heap:BinaryHeap<_> = char_count
         .into_iter()
@@ -131,7 +158,7 @@ fn char_count_to_huffman_encoding(char_count: HashMap<char, Count>) ->
     }
 }
 
-fn serialize_huffman_encoding(encoding: &HashMap<char, BitVec<LittleEndian, u8>>) -> Vec<u8> {
+fn serialize_huffman_encoding(encoding: &HashMap<char, BitVec>) -> Vec<u8> {
     let mut buffer: Vec<u8> = Vec::with_capacity(encoding.len());
     let mut utf8_buffer = [0_u8; 4];
     let mut encoding: Vec<_> = encoding.into_iter().collect();
@@ -181,22 +208,56 @@ where R: BufRead + Seek, W:Write
     Ok(())
 }
 
+fn read_utf8<R: Read>(r:&mut R) -> Result<char, Box<dyn Error>> {
+    let mut buffer = [0_u8;4];
+    r.read_exact(&mut buffer[0..1])?;
+    let num_bytes = if buffer[0] & 0b10000000u8 == 0 {
+        1
+    } else if buffer[0] & 0b11110000u8 == 0b11110000u8 {
+        4
+    } else if buffer[0] & 0b11100000u8 == 0b11100000u8 {
+        3
+    } else if buffer[0] & 0b11000000u8 == 0b11000000u8 {
+        2
+    } else {
+        return Err(Box::new(std::io::Error::new(ErrorKind::InvalidData, "invalid utf-8")));
+    };
+    let utf8_slice = &mut buffer[0..num_bytes];
+    r.read_exact(&mut utf8_slice[1..])?;
+    let string = std::str::from_utf8(utf8_slice)?;
+    let ch = string.chars().next().unwrap();
+    Ok(ch)
+}
+
+// read one line (slowly) by reading single bytes at a time
+fn read_line<R:Read>(r:&mut R, buf: &mut String) -> Result<usize, Box<dyn Error>> {
+    let mut ch = ' ';
+    let mut num_read:usize = 0;
+    while ch != '\n' {
+        ch = read_utf8(r)?;
+        buf.push(ch);
+        num_read += 1;
+    };
+    Ok(num_read)
+} 
+
 fn decode<R, W>(mut r: R, mut out: W) -> Result<(), Box<dyn Error>>
-where R: BufRead, W:Write
+where R: Read + Seek, W:Write
 {
-    let mut huffman_encoding: HashMap<BitVec<LittleEndian, u8>, char> = HashMap::new();
+    let mut huffman_encoding: HashMap<BitVec, char> = HashMap::new();
     // parse huffman encoding for each character
     let mut line = String::new();
-    while let Ok(_size) = r.read_line(&mut line) {
+    loop {
+        read_line(&mut r, &mut line)?;
         // for use when encoding the '\n' character itself
         let mut spare_line = String::new();
         line.pop(); // remove trailing '\n'
         let mut chars = line.chars();
         let encoded_char = match chars.next() {
             Some(character) => character,
-            None => {
-                r.read_line(&mut spare_line)?;
-                if line == "\n" {
+            None => { // this was an empty line
+                read_line(&mut r, &mut spare_line)?;
+                if spare_line == "\n" {
                     break // two empty lines -> end of encoding section
                 }
                 spare_line.pop();
@@ -209,7 +270,7 @@ where R: BufRead, W:Write
             match bit {
                 '0' => encoding.push(false),
                 '1' => encoding.push(true),
-                _ => panic!()  // TODO: return Err(ParseError)
+                _ => return Err(Box::new(HuffmanEncodingError::new(encoding)))
             }
         }
         line.clear();
@@ -217,22 +278,20 @@ where R: BufRead, W:Write
     }
     // parse text of file
     let mut bytes = r.bytes();
-    let mut bit_buffer:BitVec<LittleEndian, u8> = BitVec::new();
-    let mut to_encode: BitVec<LittleEndian, u8> = BitVec::new();
+    let mut bit_buffer:BitVec = BitVec::new();
+    let mut to_encode: BitVec = BitVec::new();
     while let Some(byte) = bytes.next() {
         let byte = byte?;
-        //println!("reading byte: {}", byte);
-        let mut tmp: BitVec<LittleEndian, u8> = BitVec::from_element(byte);
+        let mut tmp: BitVec = BitVec::from_element(byte);
         tmp.reverse();
         bit_buffer.append(&mut tmp);
         while let Some(bit) = bit_buffer.pop() {
-            //println!("reading bit: {}", bit);
             to_encode.push(bit);
-            if to_encode.len() > 100 { //TODO: settle on meaningful number here
-                // this indicates an encoding error, as it means one character
-                // is 1/(2^100) times less likely to appear than another character
-                // the source text had over 10^30 characters -> 10^18 TB
-                panic!("to_encode too long!")
+            if to_encode.len() > 100 { //TODO: put meaningful number here
+                // one character is 1/(2^100) times less likely to appear
+                // than another character the source text had over 10^30 
+                // characters -> 10^18 TB
+                return Err(Box::new(HuffmanEncodingError::new(to_encode)))
             }
             match huffman_encoding.get(&to_encode) {
                 None => {;},
@@ -241,13 +300,11 @@ where R: BufRead, W:Write
                     let mut utf8_buffer = [0_u8;4];
                     let encoded = character.encode_utf8(&mut utf8_buffer);
                     out.write(encoded.as_bytes())?;
-                    //ret.push(*character);
                     to_encode.clear();
                 }
             }
         }
     }
-    //Ok(ret)
     Ok(())
 }
 
@@ -257,29 +314,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let book = BufReader::new(File::open(uncompressed_path)?);
     let out = File::create(compressed_path)?;
     encode(book, out)?;
-    // let char_count = count_chars(&mut book)?;
-    // let encoding = char_count_to_huffman_encoding(char_count);
-    // drop(book);
 
-    // let book = BufReader::new(File::open(path).expect("File not found"));
-    // let mut buffer = encoding!();
-    // for line in book.lines() {
-    //     let line = line?;
-    //     for character in line.chars() {
-    //         let code = encoding.get(&character).unwrap();
-    //         buffer.append(&mut code.clone());
-    //     }
-    // }
-    // let mut file = File::create("/home/max/code/rust/compression/src/Grimms.huffman")
-    //     .expect("Could not create file");
-    // file.write(&serialize_huffman_encoding(&encoding)[..])?;
-    // let bytes:Vec<u8> = buffer.into();
-    // file.write(&bytes[..])?;
-
-    let compressed = BufReader::new(File::open(compressed_path)?);
+    let compressed = File::open(compressed_path)?;
     let out = File::create("./test/Grimms.decompressed")?;
     decode(compressed, out)?;
-    //println!("{}", &decoded[0..100]);
 
     Ok(())
 }
