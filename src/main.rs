@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt::Display;
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 
 use bitvec::prelude::{bitvec, LittleEndian};
 
@@ -215,55 +215,14 @@ where
     Ok(())
 }
 
-fn read_utf8<R: Read>(r: &mut R) -> Result<char, Box<dyn Error>> {
-    let mut buffer = [0_u8; 4];
-    r.read_exact(&mut buffer[0..1])?;
-    let num_bytes = if buffer[0] & 0b1000_0000u8 == 0 {
-        1
-    } else if buffer[0] & 0b1111_0000u8 == 0b1111_0000u8 {
-        4
-    } else if buffer[0] & 0b1110_0000u8 == 0b1110_0000u8 {
-        3
-    } else if buffer[0] & 0b1100_0000u8 == 0b1100_0000u8 {
-        2
-    } else {
-        return Err(Box::new(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "invalid utf-8",
-        )));
-    };
-    let utf8_slice = &mut buffer[0..num_bytes];
-    r.read_exact(&mut utf8_slice[1..])?;
-    let string = std::str::from_utf8(utf8_slice)?;
-    let ch = string.chars().next().unwrap();
-    Ok(ch)
-}
-
-// read one line (slowly) by reading single bytes at a time
-fn read_line<R>(r: &mut R, buf: &mut String) -> Result<usize, Box<dyn Error>>
-where
-    R: Read,
-{
-    let mut ch = ' ';
-    let mut num_read: usize = 0;
-    while ch != '\n' {
-        ch = read_utf8(r)?;
-        buf.push(ch);
-        num_read += 1;
-    }
-    Ok(num_read)
-}
-
-fn decode<R, W>(mut r: R, mut out: W) -> Result<(), Box<dyn Error>>
-where
-    R: Read + Seek,
-    W: Write,
-{
+fn build_decoding_table<R: BufRead>(
+    r: &mut R,
+) -> Result<HashMap<BitVec, char>, Box<dyn Error>> {
     let mut huffman_encoding: HashMap<BitVec, char> = HashMap::new();
     // parse huffman encoding for each character
     let mut line = String::new();
     loop {
-        read_line(&mut r, &mut line)?;
+        r.read_line(&mut line)?;
         line.pop(); // remove trailing '\n'
         let mut chars = line.chars();
         let encoded_char = match chars.next() {
@@ -271,7 +230,7 @@ where
             None => {
                 // this was an empty line
                 line.clear();
-                read_line(&mut r, &mut line)?;
+                r.read_line(&mut line)?;
                 if line == "\n" {
                     break; // two empty lines -> end of encoding section
                 }
@@ -291,7 +250,15 @@ where
         line.clear();
         huffman_encoding.insert(encoding, encoded_char);
     }
-    // parse text of file
+    Ok(huffman_encoding)
+}
+
+fn decode<R, W>(mut r: R, mut out: W) -> Result<(), Box<dyn Error>>
+where
+    R: BufRead,
+    W: Write,
+{
+    let encoding: HashMap<BitVec, char> = build_decoding_table(&mut r)?;
     let bytes = r.bytes();
     let mut bit_buffer: BitVec = BitVec::new();
     let mut to_encode: BitVec = BitVec::new();
@@ -302,20 +269,14 @@ where
         bit_buffer.append(&mut tmp);
         while let Some(bit) = bit_buffer.pop() {
             to_encode.push(bit);
-            if to_encode.len() > 100 {
-                // TODO: put meaningful number here
-                // one character is 1/(2^100) times less likely to appear
-                // than another character the source text had over 10^30
-                // characters -> 10^18 TB
-                return Err(Box::new(HuffmanEncodingError::new(to_encode)));
+            if to_encode.len() > Count::min_value().count_zeros() as usize {
+                Err(HuffmanEncodingError::new(to_encode.clone()))?;
             }
-            match huffman_encoding.get(&to_encode) {
+            match encoding.get(&to_encode) {
                 None => {}
-                Some(character) => {
-                    // can store one utf8 encoded character
-                    let mut utf8_buffer = [0_u8; 4];
-                    let encoded = character.encode_utf8(&mut utf8_buffer);
-                    out.write_all(encoded.as_bytes())?;
+                Some(ch) => {
+                    let mut utf8_buf = [0_u8; 4];
+                    out.write_all(ch.encode_utf8(&mut utf8_buf).as_bytes())?;
                     to_encode.clear();
                 }
             }
