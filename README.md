@@ -1,0 +1,2 @@
+# Compression Experiments
+This repository contains experiments with (huffman) compression. Feel free to learn from it. The huffman encoding in this crate is hundreds of times slower than DEFLATE (gzip), and has a worse compression ratio, so don't use it if you need something compressed!
