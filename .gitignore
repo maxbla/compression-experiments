@@ -1,4 +1,7 @@
 /target
 **/*.rs.bk
 /.vscode
+
+# Performance data, visualizations
 perf.data*
+flame*.svg

@@ -8,3 +8,13 @@ edition = "2018"
 
 [dependencies]
 bitvec = "0.15.2"
+phf = "0.8"
+phf_codegen = "0.8"
+smallbitvec = "2.4.0"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "my_benchmark"
+harness = false
